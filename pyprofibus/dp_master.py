@@ -89,6 +89,7 @@ class DpSlaveState(object):
 		self.applyState()
 
 		# Context for FC-Bit toggeling
+		#TODO this should be done in FDL
 		self.fcb = FdlFCB()
 
 		# Currently running request telegram
