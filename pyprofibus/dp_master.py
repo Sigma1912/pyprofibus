@@ -295,7 +295,11 @@ class DpMaster(object):
 
 		self.__runTimer = monotonic_time()
 		self.__runCount = 0
-
+		
+                # Counter for number of short-confirmations during  
+                # data_exchange from input only slaves
+		self.__ScCount = 1
+		
 		# Create the transceivers
 		self.fdlTrans = FdlTransceiver(self.phy)
 		self.dpTrans = DpTransceiver(self.fdlTrans, thisIsMaster=True)
@@ -583,7 +587,24 @@ class DpMaster(object):
 				slave.slaveDesc.slaveAddr)
 			slave.flushRxQueue()
 			slave.dxStartTime = monotonic_time()
-
+			
+		if slave.shortAckReceived:
+			slave.pendingReq = None
+			slave.faultDeb.ok()
+			slave.restartStateTimeout()
+			self._releaseSlave(slave)
+ 			self.__ScCount += 1
+            
+			if (self.__ScCount > 10):
+				# Send a SlaveDiag request
+				self.__send(slave,
+				telegram=DpTelegram_SlaveDiag_Req(
+				da=slave.slaveDesc.slaveAddr,
+				sa=self.masterAddr),
+					timeout=0.05)
+                                # Reset short confirmation counter
+				self.__ScCount = 0
+			
 		if slave.pendingReq:
 			for telegram in slave.getRxQueue():
 				if not DpTelegram_DataExchange_Con.checkType(telegram):
