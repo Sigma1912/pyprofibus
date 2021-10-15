@@ -2,7 +2,7 @@
 #
 # PROFIBUS DP - Master
 #
-# Copyright (c) 2013-2021 Michael Buesch <m@bues.ch>
+# Copyright (c) 2013-2020 Michael Buesch <m@bues.ch>
 #
 # Licensed under the terms of the GNU General Public License version 2,
 # or (at your option) any later version.
@@ -64,9 +64,9 @@ class DpSlaveState(object):
 		"dxStartTime",
 		"faultDeb",
 		"fcb",
-		"inData",
 		"master",
-		"outData",
+		"fromSlaveData",
+		"toSlaveData",
 		"pendingReq",
 		"pendingReqTimeout",
 		"rxQueue",
@@ -103,8 +103,8 @@ class DpSlaveState(object):
 		self.rxQueue = []
 
 		# In/Out user data
-		self.outData = None
-		self.inData = None
+		self.toSlaveData = None
+		self.fromSlaveData = None
 
 	def getRxQueue(self):
 		rxQueue = self.rxQueue
@@ -156,42 +156,48 @@ class DpSlaveDesc(object):
 	"""
 
 	__slots__ = (
+		"index",
+		"name",
+		"chkCfgTelegram",
 		"dpm",
 		"gsd",
-		"slaveAddr",
 		"identNumber",
-		"name",
-		"index",
-		"inputSize",
-		"outputSize",
+		"setPrmTelegram",
+		"setPrmTelegram",
+		"slaveAddr",
 		"slaveConf",
 		"userData",
-		"setPrmTelegram",
-		"chkCfgTelegram",
+		"inputSize",
+		"outputSize",
+
 	)
 
-	def __init__(self, slaveConf=None):
+	def __init__(self,
+		     gsd,
+		     slaveAddr,
+		     slaveConf=None):
+		self.gsd = gsd
+		self.slaveAddr = slaveAddr
+		self.slaveConf = slaveConf
+		self.identNumber = gsd.getIdentNumber() if gsd else 0
 		self.dpm = None
-		self.gsd = slaveConf.gsd if slaveConf else None
-		self.slaveAddr = slaveConf.addr if slaveConf else None
-		self.identNumber = self.gsd.getIdentNumber() if self.gsd else 0
-		self.name = slaveConf.name if slaveConf else None
-		self.index = slaveConf.index if slaveConf else None
+		self.name = None
+		self.index = None
+		self.userData = {} # For use by application code.
 		self.inputSize = slaveConf.inputSize if slaveConf else None
 		self.outputSize = slaveConf.outputSize if slaveConf else None
-		self.slaveConf = slaveConf
-		self.userData = {} # For use by application code.
+
 
 		# Prepare a Set_Prm telegram.
 		self.setPrmTelegram = DpTelegram_SetPrm_Req(
-					da=self.slaveAddr,
-					sa=None)
+					da = self.slaveAddr,
+					sa = None)
 		self.setPrmTelegram.identNumber = self.identNumber
 
 		# Prepare a Chk_Cfg telegram.
 		self.chkCfgTelegram = DpTelegram_ChkCfg_Req(
-					da=self.slaveAddr,
-					sa=None)
+					da = self.slaveAddr,
+					sa = None)
 
 	def setCfgDataElements(self, cfgDataElements):
 		"""Sets DpCfgDataElement()s from the specified list
@@ -257,11 +263,25 @@ class DpSlaveDesc(object):
 		self.setPrmTelegram.wdFact1 = fact1
 		self.setPrmTelegram.wdFact2 = fact2
 
+	def setMasterOutData(self, data):
+		"""Set the master-out-data that will be sent the
+		next time we are able to send something to that slave.
+		"""
+		self.dpm._setToSlaveData(self, data)
+
+	def getMasterInData(self):
+		"""Get the latest received master-in-data.
+		Returns None, if there was no received data.
+		"""
+		return self.dpm._getFromSlaveData(self)
+
 	def setOutData(self, outData):
-		self.dpm.setSlaveOutData(self, outData)
+		"""Deprecated: Don't use this method. Use setMasterOutData() instead."""
+		self.setMasterOutData(outData)
 
 	def getInData(self):
-		return self.dpm.getSlaveInData(self)
+		"""Deprecated: Don't use this method. Use getMasterInData() instead."""
+		return self.getMasterInData()
 
 	def __repr__(self):
 		return "DpSlaveDesc(identNumber=%s, slaveAddr=%d)" %\
@@ -296,13 +316,13 @@ class DpMaster(object):
 		self.__runTimer = monotonic_time()
 		self.__runCount = 0
 		self.__ScCount = 0
-
+        
 		# Create the transceivers
 		self.fdlTrans = FdlTransceiver(self.phy)
 		self.dpTrans = DpTransceiver(self.fdlTrans, thisIsMaster=True)
 
-		mcastSlaveDesc = DpSlaveDesc()
-		mcastSlaveDesc.slaveAddr = FdlTelegram.ADDRESS_MCAST
+		mcastSlaveDesc = DpSlaveDesc(gsd=None,
+					     slaveAddr=FdlTelegram.ADDRESS_MCAST)
 		mcastSlave = DpSlaveState(self, mcastSlaveDesc)
 
 		self.__slaveDescs = {
@@ -522,54 +542,46 @@ class DpMaster(object):
 						self.__errorMsg("Slave %d is not reachable "
 							"via this line." %\
 							slave.slaveDesc.slaveAddr)
-						slave.faultDeb.fault()
 					if telegram.cfgFault():
 						self.__errorMsg("Slave %d reports a faulty "
 							"configuration (Chk_Cfg)." %\
 							slave.slaveDesc.slaveAddr)
-						slave.faultDeb.fault()
 					if telegram.prmFault():
 						self.__errorMsg("Slave %d reports a faulty "
 							"parameterization (Set_Prm)." %\
 							slave.slaveDesc.slaveAddr)
-						slave.faultDeb.fault()
 					if telegram.prmReq():
 						self.__debugMsg("Slave %d requests a new "
 							"parameterization (Set_Prm)." %\
 							slave.slaveDesc.slaveAddr)
-						slave.faultDeb.fault()
 					if telegram.isNotSupp():
 						self.__errorMsg("Slave %d replied with "
 							"\"function not supported\". "
 							"The parameters should be checked "
 							"(Set_Prm)." %\
 							slave.slaveDesc.slaveAddr)
-						slave.faultDeb.fault()
 					if telegram.masterLock():
 						self.__errorMsg("Slave %d is already controlled "
 							"(locked to) another DP-master." %\
 							slave.slaveDesc.slaveAddr)
-						slave.faultDeb.fault()
 					if not telegram.hasOnebit():
 						self.__debugMsg("Slave %d diagnostic "
 							"always-one-bit is zero." %\
 							slave.slaveDesc.slaveAddr)
-						slave.faultDeb.fault()
 					if telegram.hasExtDiag():
 						pass#TODO turn on red DIAG-LED
-						slave.faultDeb.fault()
 
 					if telegram.isReadyDataEx():
 						slave.setState(slave.STATE_DX)
 						return None
-					if telegram.needsNewPrmCfg():
+					elif telegram.needsNewPrmCfg():
 						slave.setState(slave.STATE_INIT)
 						return None
 					break
 				else:
 					self.__debugMsg("Received spurious "
 						"telegram:\n%s" % str(telegram))
-					slave.faultDeb.fault()
+
 		if (not slave.pendingReq or
 		    slave.pendingReqTimeout.exceed()):
 			ok = self.__send(slave,
@@ -579,9 +591,7 @@ class DpMaster(object):
 					 timeout=0.05)
 			if not ok:
 				self.__debugMsg("SlaveDiag_Req failed")
-				slave.faultDeb.fault()
 				return None
-		self.__checkFaultDeb(slave, False)
 		return None
 
 	def __runSlave_dataExchange(self, slave):
@@ -624,14 +634,14 @@ class DpMaster(object):
 							"on slave %d" % slave.slaveDesc.slaveAddr)
 					dataExInData = telegram.getDU()
 			if (dataExInData is not None or
-			    (slave.slaveDesc.inputSize == 0 and slave.shortAckReceived)):
+			    (slaveOutputSize == 0 and slave.shortAckReceived)):
 				# We received some data.
 				slave.pendingReq = None
 				slave.faultDeb.ok()
 				slave.restartStateTimeout()
 				self._releaseSlave(slave)
 				self.__ScCount += 1
-                
+
 			else:
 				# No data or ack received from slave.
 				if slave.pendingReqTimeout.exceed():
@@ -640,14 +650,14 @@ class DpMaster(object):
 					slave.faultDeb.fault()
 					slave.pendingReq = None
 		else:
-			if slave.slaveDesc.inputSize == 0 and self.__ScCount > 10: #TODO diag request.
+			if slaveOutputSize == 0 and self.__ScCount > 10: #TODO diag request.
 				slave.setState(slave.STATE_WDXRDY, 0.2)
 				self.__ScCount = 0                
 			else:
 				# Send the out data telegram, if any.
-				outData = slave.outData
-				if outData is not None:
-					if slaveOutputSize == 0:
+				toSlaveData = slave.toSlaveData
+		        	if toSlaveData is not None:
+		        		if slave.slaveDesc.inputSize == 0:
 						self.__debugMsg("Got data for slave, "
 								"but slave does not expect any input data.")
 					else:
@@ -655,11 +665,11 @@ class DpMaster(object):
 								 telegram=DpTelegram_DataExchange_Req(
 									da=slave.slaveDesc.slaveAddr,
 									sa=self.masterAddr,
-									du=outData),
+									du=toSlaveData),
 								 timeout=0.1)
 						if ok:
 							# We sent it. Reset the data.
-							slave.outData = None
+							slave.toSlaveData = None
 						else:
 							self.__debugMsg("DataExchange_Req failed")
 							slave.faultDeb.fault()
@@ -783,25 +793,25 @@ class DpMaster(object):
 		self.__runNextSlaveIndex = (runNextSlaveIndex + 1) % len(slaveDescsList)
 
 		slave = self.__slaveStates[slaveDesc.slaveAddr]
-		slave.inData = self.__runSlave(slave)
+		slave.fromSlaveData = self.__runSlave(slave)
 
 		return slaveDesc
 
-	def setSlaveOutData(self, slaveDesc, outData):
-		"""Set the out-data that will be sent the
+	def _setToSlaveData(self, slaveDesc, data):
+		"""Set the master-out-data that will be sent the
 		next time we are able to send something to that slave.
 		"""
 		slave = self.__slaveStates[slaveDesc.slaveAddr]
-		slave.outData = outData
+		slave.toSlaveData = data
 
-	def getSlaveInData(self, slaveDesc):
-		"""Get the latest received in-data.
+	def _getFromSlaveData(self, slaveDesc):
+		"""Get the latest received master-in-data.
 		Returns None, if there was no received data.
 		"""
 		slave = self.__slaveStates[slaveDesc.slaveAddr]
-		inData = slave.inData
-		slave.inData = None
-		return inData
+		fromSlaveData = slave.fromSlaveData
+		slave.fromSlaveData = None
+		return fromSlaveData
 
 	def initialize(self):
 		"""Initialize the DPM."""
